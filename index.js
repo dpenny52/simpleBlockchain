@@ -35,6 +35,18 @@ const getGenesisBlock = () => {
 
 let blockchain = [getGenesisBlock()];
 
+const getLatestBlock = () => blockchain[blockchain.length - 1];
+const queryChainLengthMsg = () => ({'type': MessageType.QUERY_LATEST});
+const queryAllMsg = () => ({'type': MessageType.QUERY_ALL});
+const responseChainMsg = () =>({
+    'type': MessageType.RESPONSE_BLOCKCHAIN, 
+    'data': JSON.stringify(blockchain),
+});
+const responseLatestMsg = () => ({
+    'type': MessageType.RESPONSE_BLOCKCHAIN,
+    'data': JSON.stringify([getLatestBlock()]),
+});
+
 const calculateHash = (index, previousHash, timestamp, data) => {
   return CryptoJS.SHA256(index + previousHash + timestamp + data).toString();
 };
@@ -71,7 +83,52 @@ const addBlock = (newBlock) => {
   }
 }
 
-const getLatestBlock = () => blockchain[blockchain.length - 1];
+const isValidChain = (blockchainToValidate) => {
+  if (JSON.stringify(blockchainToValidate[0]) !== JSON.stringify(getGenesisBlock())) {
+    return false;
+  }
+  let tempBlocks = [blockchainToValidate[0]];
+  for (var i = 1; i < blockchainToValidate.length; i++) {
+      if (isValidNewBlock(blockchainToValidate[i], tempBlocks[i - 1])) {
+          tempBlocks.push(blockchainToValidate[i]);
+      } else {
+          return false;
+      }
+  }
+  return true;
+};
+
+const replaceChain = (newBlocks) => {
+  if (isValidChain(newBlocks) && newBlocks.length > blockchain.length) {
+    console.log('Received blockchain is valid. Replacing current blockchain with received blockchain');
+    blockchain = newBlocks;
+    broadcast(responseLatestMsg());
+  } else {
+    console.log('Received blockchain invalid');
+  }
+};
+
+const handleBlockchainResponse = (message) => {
+  var receivedBlocks = JSON.parse(message.data).sort((b1, b2) => (b1.index - b2.index));
+  var latestBlockReceived = receivedBlocks[receivedBlocks.length - 1];
+  var latestBlockHeld = getLatestBlock();
+  if (latestBlockReceived.index > latestBlockHeld.index) {
+      console.log('Blockchain possibly behind. We got: ' + latestBlockHeld.index + ' Peer got: ' + latestBlockReceived.index);
+      if (latestBlockHeld.hash === latestBlockReceived.previousHash) {
+          console.log("We can append the received block to our chain");
+          blockchain.push(latestBlockReceived);
+          broadcast(responseLatestMsg());
+      } else if (receivedBlocks.length === 1) {
+          console.log("We have to query the chain from our peer");
+          broadcast(queryAllMsg());
+      } else {
+          console.log("Received blockchain is longer than current blockchain");
+          replaceChain(receivedBlocks);
+      }
+  } else {
+      console.log('received blockchain is not longer than current blockchain. Do nothing');
+  }
+};
 
 const initExpressServer = () => {
   const app = express();
@@ -91,13 +148,13 @@ const initExpressServer = () => {
   app.post('/mineBlock', (req, res) => {
     const newBlock = generateNextBlock(req.body.data);
     addBlock(newBlock);
-    // broadcast(responseLatestMsg());
+    broadcast(responseLatestMsg());
     console.log('block added: ' + JSON.stringify(newBlock));
     res.send();
   });
 
   app.listen(http_port, () => console.log('Listening on port ' + http_port));
-}
+};
 
 var initMessageHandler = (ws) => {
   ws.on('message', (data) => {
@@ -113,11 +170,12 @@ var initMessageHandler = (ws) => {
       case MessageType.RESPONSE_BLOCKCHAIN:
         handleBlockchainResponse(message);
         break;
-  }
-});
+    }
+  });
+};
 
 const initErrorHandler = (ws) => {
-  var closeConnection = (ws) => {
+  const closeConnection = (ws) => {
     console.log('Connection failed to peer: ' + ws.url);
     sockets.splice(sockets.indexOf(ws), 1);
   };
@@ -145,9 +203,14 @@ const connectToPeers = (newPeers) => {
     const ws = new WebSocket(peer);
     ws.on('open', () => initConnection(ws));
     ws.on('error', () => {
-      console.log('connection failed')
+      console.log('connection failed');
     });
   });
 };
 
+const write = (ws, message) => ws.send(JSON.stringify(message));
+const broadcast = (message) => sockets.forEach(socket => write(socket, message));
+
+connectToPeers(initialPeers);
 initExpressServer();
+initP2PServer();
